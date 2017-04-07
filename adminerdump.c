@@ -2,23 +2,71 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define URL "http://localhost/adminer.php"
+/* #define URL "http://localhost/adminer.php" */
 /* #define URL "http://localhost/test.php" */
-#define USERNAME "root"
-#define PASSWORD "pebble"
-#define DATABASE "agenturhalma"
+/* #define DATABASE "agenturhalma" */
 
 #define BUFSIZE 16 * 8192
+
+gchar *username;
+gchar *password;
+gchar *database;
+gchar *url;
+gchar *output = NULL;
+gchar *format = "sql";
+gchar *db_style = "";
+gboolean routines = FALSE;
+gboolean events = FALSE;
+gchar *table_style = "DROP+CREATE";
+gboolean triggers = FALSE;
+gchar *data_style = "INSERT";
+gboolean zip = FALSE;
+
+static GOptionEntry entries[] = {
+	{ "username", 'u', 0, G_OPTION_ARG_STRING, &username, "Username", NULL },
+	{ "password", 'p', 0, G_OPTION_ARG_STRING, &password, "Password", NULL },
+	{ "database", 'd', 0, G_OPTION_ARG_STRING, &database, "Database name", NULL },
+	{ "output", 'o', 0, G_OPTION_ARG_STRING, &output, "Output to file", NULL },
+	{ "format", 'f', 0, G_OPTION_ARG_STRING, &format, "Format (sql,csv,csv; or tsv)", NULL },
+	{ "db-style", 's', 0, G_OPTION_ARG_STRING, &db_style, "Database style (USE, DROP+CREATE or CREATE)", NULL },
+	{ "routines", 'r', 0, G_OPTION_ARG_NONE, &routines, "Include routines", NULL },
+	{ "events", 'e', 0, G_OPTION_ARG_NONE, &events, "Include events", NULL },
+	{ "table-style", 'T', 0, G_OPTION_ARG_STRING, &table_style, "Table style (USE, DROP+CREATE or CREATE)", NULL },
+	{ "triggers", 't', 0, G_OPTION_ARG_NONE, &triggers, "Include triggers", NULL },
+	{ "data-style", 'D', 0, G_OPTION_ARG_STRING, &data_style, "Data style (INSERT, TRUNCATE+INSERT or INSERT+UPDATE)", NULL },
+	{ "zip" , 'z', 0, G_OPTION_ARG_NONE, &zip, "Compress output (gzip), only applies if output is to file (-o/--output)", NULL}
+};
 
 static void build_form_data(const gchar *table_name, GString *form_data) {
 	g_string_append_printf(form_data, "data[]=%s&table[]=%s&", table_name, table_name);
 }
 
-static void dump_response(GInputStream *istream) {
+static void dump_response(GInputStream *istream, const gchar *outfile) {
 	GError *error;
 	gsize len;
 	gchar buffer[BUFSIZE];
+	GOutputStream *os;
 
+	error = NULL;
+
+	if (outfile != NULL) {
+
+		// Output to file
+		GFile *file = g_file_new_for_path(outfile);
+		os = G_OUTPUT_STREAM(g_file_replace(file, NULL, FALSE, G_FILE_CREATE_REPLACE_DESTINATION, NULL, &error));
+		if (error) {
+			g_error("%s\n", error->message);
+		}
+
+		g_output_stream_splice(os, istream, G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET, NULL, &error);
+		if (error) {
+			g_error("%s\n", error->message);
+		}
+
+		return;
+	}
+	
+	// Output to stdout
 	do {
 		error = NULL;
 		len = g_input_stream_read(istream, buffer, sizeof(buffer), NULL, &error);
@@ -32,21 +80,35 @@ static void dump_response(GInputStream *istream) {
 	} while (len > 0);
 }
 
-static void on_authenticate(SoupSession *session, SoupMessage *message, SoupAuth *auth, gboolean retrying, gpointer user_data) {
-	g_debug("Authenticate!");
-	exit(0);
-}
 
 int main(int argc, char **argv) {
+
 	SoupSession *session;
 	SoupMessage *message;
 	SoupCookieJar *cookiejar;
 	GError *error;
 	GInputStream *istream;
 	gchar buffer[BUFSIZE];
+	GOptionContext  *context;
 
-	char formdata[8192];
-	/* g_snprintf(formdata, sizeof(formdata), "username=%s&password=%s&database=%s", USERNAME, PASSWORD, DATABASE); */
+	context = g_option_context_new("url");
+	g_option_context_add_main_entries(context, entries, NULL);
+	if (!g_option_context_parse(context, &argc, &argv, &error)) {
+		g_print("Option parsing failed: %s\n", error->message);
+		exit(1);
+	}
+	if (argc < 1) {
+		g_print("Missing URL\n");
+		exit(1);
+	}
+	url = g_strdup(argv[1]);
+	g_debug("url: %s", url);
+	g_debug("username: %s", username);
+	g_debug("password: %s", password);
+	g_debug("database: %s", database);
+
+
+	gchar formdata[8192];
 	g_snprintf(formdata, sizeof(formdata), 
 			"auth[driver]=%s&"
 			"auth[server]=%s&"
@@ -55,31 +117,32 @@ int main(int argc, char **argv) {
 			"auth[db]=%s",
 			"server",
 			"",
-			USERNAME,
-			PASSWORD,
-			DATABASE
+			username,
+			password,
+			database
 	);
 	g_debug("%s", formdata);
 
 	session = soup_session_new();
+
 	cookiejar = soup_cookie_jar_new();
 	soup_cookie_jar_set_accept_policy(cookiejar, SOUP_COOKIE_JAR_ACCEPT_ALWAYS);
-
 	soup_session_add_feature(session, SOUP_SESSION_FEATURE(cookiejar));
 	g_object_unref(cookiejar);
 
-	message = soup_message_new("POST", URL);
-	soup_message_set_request(message, "application/x-www-form-urlencoded",
-			SOUP_MEMORY_COPY, formdata, strlen(formdata));
-
-	g_signal_connect(session, "authenticate", G_CALLBACK(on_authenticate), NULL);
-
-	/* soup_message_headers_append(msg->request_headers, "Refere", */
+	message = soup_message_new("POST", url);
+	if (message == NULL) {
+		g_error("URL is invalid: %s\n", url);
+	}
+	soup_message_set_request(message, "application/x-www-form-urlencoded", SOUP_MEMORY_COPY, formdata, strlen(formdata));
 
 	error = NULL;
 	istream = soup_session_send(session, message, NULL, &error);
+	if (error != NULL) {
+		g_error("%s\n", error->message);
+	}
 
-	/* g_print("status: %u\n", message->status_code); */
+	g_debug("status: %u", message->status_code);
 
 	if (message->status_code != 200) {
 		g_error("Server returned %u\n", message->status_code);
@@ -92,18 +155,6 @@ int main(int argc, char **argv) {
 		g_error("%s", error->message);
 	}
 	
-	/* do { */
-	/* 	error = NULL; */
-	/* 	len = g_input_stream_read(istream, buffer, sizeof(buffer), NULL, &error); */
-	/* 	if (error) { */
-	/* 		g_error("Failed: %s\n", error->message); */
-	/* 		g_error_free(error); */
-	/* 		exit(-1); */
-	/* 	} */
-	/* 	buffer[len] = '\0'; */
-	/* 	#<{(| g_print("%s", buffer); |)}># */
-	/* 	g_print("%u bytes read\n", (int)len); */
-	/* } while (len > 0); */
 
 	error = NULL;
 	g_input_stream_close(istream, NULL, &error);
@@ -125,16 +176,14 @@ int main(int argc, char **argv) {
 		break;
 	}
 
-	g_debug("%s\n", token);
+	g_debug("%s", token);
 	
 	SoupMessage *message2;
-	gchar *url;
-	url = g_strdup_printf("%s?username=%s&db=%s&dump=", URL, USERNAME, DATABASE);
-	g_debug("%s\n", url);
+	gchar *url2;
+	url2 = g_strdup_printf("%s?username=%s&db=%s&dump=", url, username, database);
+	g_debug("%s", url2);
 
-	message2 = soup_message_new("GET", url);
-
-	/* soup_message_set_request(message2, "application/x-www-form-urlencoded", SOUP_MEMORY_COPY, NULL, 0); */
+	message2 = soup_message_new("GET", url2);
 
 	error = NULL;
 	istream = soup_session_send(session, message2, NULL, &error);
@@ -165,9 +214,31 @@ int main(int argc, char **argv) {
 
 	GString *form_data;
 	form_data = g_string_new(NULL);
+	g_string_printf(form_data, "output=%s&format=%s&db_style=%s&routines=%u&events=%u&table_style=%s&triggers=%u&data_style=%s&token=%s&",
+			(output != NULL && zip) ? "gz" : "text" ,
+			format,
+			db_style,
+			(gint)routines,
+			(gint)events,
+			table_style,
+			(gint)triggers,
+			data_style,
+			token
+	);
+	g_debug("%s\n", form_data->str);
 
 	g_list_foreach(tables, (GFunc)build_form_data, form_data);
-	g_string_append_printf(form_data, "token=%s&", token);
-	g_print("%s\n", form_data->str);
+	form_data = g_string_truncate(form_data, form_data->len - 1);
+
+	SoupMessage *message3 = soup_message_new("POST", url2);
+	soup_message_set_request(message3, "application/x-www-form-urlencoded", SOUP_MEMORY_COPY, form_data->str, form_data->len);
+	error = NULL;
+	GInputStream *is;
+	is = soup_session_send(session, message3, NULL, &error);
+	if (error) {
+		g_error("%s\n", error->message);
+	}
+
+	dump_response(is, output);
 	return 0;
 }
